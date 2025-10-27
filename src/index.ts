@@ -14,9 +14,18 @@ interface DeviceUpdate {
 interface Stats {
   apiCalls: { last24h: number; last7d: number };
   tokenRefreshes: { last24h: number; last7d: number };
+  errors: { last24h: number; last7d: number };
 }
 
 const TTL_7_DAYS = 604800;
+
+function extractTimestamp(key: string, prefix: string): number {
+  return parseInt(key.replace(prefix, ''));
+}
+
+function countStatsInWindow(keys: Array<{ name: string }>, prefix: string, minTimestamp: number): number {
+  return keys.filter((key) => extractTimestamp(key.name, prefix) >= minTimestamp).length;
+}
 
 async function recordApiCall(kv: KVNamespace): Promise<void> {
   const timestamp = Date.now();
@@ -28,6 +37,11 @@ async function recordTokenRefresh(kv: KVNamespace): Promise<void> {
   await kv.put(`stats:token_refresh:${timestamp}`, '1', { expirationTtl: TTL_7_DAYS });
 }
 
+async function recordError(kv: KVNamespace): Promise<void> {
+  const timestamp = Date.now();
+  await kv.put(`stats:error:${timestamp}`, '1', { expirationTtl: TTL_7_DAYS });
+}
+
 async function getStats(kv: KVNamespace): Promise<Stats> {
   const now = Date.now();
   const last24h = now - 86400000;
@@ -35,31 +49,29 @@ async function getStats(kv: KVNamespace): Promise<Stats> {
 
   const apiCalls = await kv.list({ prefix: 'stats:api_call:' });
   const tokenRefreshes = await kv.list({ prefix: 'stats:token_refresh:' });
-
-  const apiCallCount24h = apiCalls.keys.filter((key) => {
-    const timestamp = parseInt(key.name.replace('stats:api_call:', ''));
-    return timestamp >= last24h;
-  }).length;
-
-  const apiCallCount7d = apiCalls.keys.filter((key) => {
-    const timestamp = parseInt(key.name.replace('stats:api_call:', ''));
-    return timestamp >= last7d;
-  }).length;
-
-  const tokenRefreshCount24h = tokenRefreshes.keys.filter((key) => {
-    const timestamp = parseInt(key.name.replace('stats:token_refresh:', ''));
-    return timestamp >= last24h;
-  }).length;
-
-  const tokenRefreshCount7d = tokenRefreshes.keys.filter((key) => {
-    const timestamp = parseInt(key.name.replace('stats:token_refresh:', ''));
-    return timestamp >= last7d;
-  }).length;
+  const errors = await kv.list({ prefix: 'stats:error:' });
 
   return {
-    apiCalls: { last24h: apiCallCount24h, last7d: apiCallCount7d },
-    tokenRefreshes: { last24h: tokenRefreshCount24h, last7d: tokenRefreshCount7d },
+    apiCalls: {
+      last24h: countStatsInWindow(apiCalls.keys, 'stats:api_call:', last24h),
+      last7d: countStatsInWindow(apiCalls.keys, 'stats:api_call:', last7d),
+    },
+    tokenRefreshes: {
+      last24h: countStatsInWindow(tokenRefreshes.keys, 'stats:token_refresh:', last24h),
+      last7d: countStatsInWindow(tokenRefreshes.keys, 'stats:token_refresh:', last7d),
+    },
+    errors: {
+      last24h: countStatsInWindow(errors.keys, 'stats:error:', last24h),
+      last7d: countStatsInWindow(errors.keys, 'stats:error:', last7d),
+    },
   };
+}
+
+function errorResponse(message: string, statusCode: number = 400): Response {
+  return new Response(
+    JSON.stringify({ success: false, error: message }),
+    { status: statusCode, headers: { 'Content-Type': 'application/json' } }
+  );
 }
 
 async function getOverallPresence(kv: KVNamespace): Promise<Presence> {
@@ -77,7 +89,7 @@ async function handleDeviceUpdate(
   env: Env
 ): Promise<Response> {
   if (request.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
+    return errorResponse('Method not allowed', 405);
   }
 
   let payload: DeviceUpdate;
@@ -85,25 +97,25 @@ async function handleDeviceUpdate(
     payload = (await request.json()) as DeviceUpdate;
   } catch {
     console.error('[Worker] Invalid JSON received');
-    return new Response('Invalid JSON', { status: 400 });
+    return errorResponse('Invalid JSON', 400);
   }
 
   const { deviceId, status } = payload;
 
   if (!deviceId || !status) {
     console.error('[Worker] Missing deviceId or status');
-    return new Response('Missing deviceId or status', { status: 400 });
+    return errorResponse('Missing deviceId or status', 400);
   }
 
   if (!['home', 'away'].includes(status)) {
     console.error(`[Worker] Invalid status: ${status}`);
-    return new Response('Invalid status', { status: 400 });
+    return errorResponse('Invalid status', 400);
   }
 
   const validDevices = env.VALID_DEVICE_IDS.split(',').map((d) => d.trim());
   if (!validDevices.includes(deviceId)) {
     console.warn(`[Worker] Unknown device: ${deviceId}`);
-    return new Response('Unknown device', { status: 403 });
+    return errorResponse('Unknown device', 403);
   }
 
   console.log(`[Worker] Device update received: ${deviceId} -> ${status}`);
@@ -146,13 +158,8 @@ async function handleDeviceUpdate(
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[Worker] Failed to update presence: ${errorMsg}`);
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: errorMsg,
-        }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
+      await recordError(env.KV);
+      return errorResponse(errorMsg, 500);
     }
   }
 
@@ -169,13 +176,21 @@ async function handleDeviceUpdate(
 async function handleStatus(env: Env): Promise<Response> {
   console.log('[Worker] Status request received');
   const devices = await env.KV.list({ prefix: 'device:' });
-  const deviceStatuses: Record<string, string> = {};
 
-  for (const item of devices.keys) {
-    const status = await env.KV.get(item.name);
-    const deviceId = item.name.replace('device:', '');
+  const statuses = await Promise.all(
+    devices.keys.map((item) =>
+      env.KV.get(item.name).then((status) => ({
+        key: item.name,
+        status: status || 'unknown',
+      }))
+    )
+  );
+
+  const deviceStatuses: Record<string, string> = {};
+  for (const { key, status } of statuses) {
+    const deviceId = key.replace('device:', '');
     const anonymizedId = deviceId.slice(0, 2) + '...';
-    deviceStatuses[anonymizedId] = status || 'unknown';
+    deviceStatuses[anonymizedId] = status;
   }
 
   const tadoPresence =
