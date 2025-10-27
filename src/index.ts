@@ -11,6 +11,57 @@ interface DeviceUpdate {
   status: 'home' | 'away';
 }
 
+interface Stats {
+  apiCalls: { last24h: number; last7d: number };
+  tokenRefreshes: { last24h: number; last7d: number };
+}
+
+const TTL_7_DAYS = 604800;
+
+async function recordApiCall(kv: KVNamespace): Promise<void> {
+  const timestamp = Date.now();
+  await kv.put(`stats:api_call:${timestamp}`, '1', { expirationTtl: TTL_7_DAYS });
+}
+
+async function recordTokenRefresh(kv: KVNamespace): Promise<void> {
+  const timestamp = Date.now();
+  await kv.put(`stats:token_refresh:${timestamp}`, '1', { expirationTtl: TTL_7_DAYS });
+}
+
+async function getStats(kv: KVNamespace): Promise<Stats> {
+  const now = Date.now();
+  const last24h = now - 86400000;
+  const last7d = now - 604800000;
+
+  const apiCalls = await kv.list({ prefix: 'stats:api_call:' });
+  const tokenRefreshes = await kv.list({ prefix: 'stats:token_refresh:' });
+
+  const apiCallCount24h = apiCalls.keys.filter((key) => {
+    const timestamp = parseInt(key.name.replace('stats:api_call:', ''));
+    return timestamp >= last24h;
+  }).length;
+
+  const apiCallCount7d = apiCalls.keys.filter((key) => {
+    const timestamp = parseInt(key.name.replace('stats:api_call:', ''));
+    return timestamp >= last7d;
+  }).length;
+
+  const tokenRefreshCount24h = tokenRefreshes.keys.filter((key) => {
+    const timestamp = parseInt(key.name.replace('stats:token_refresh:', ''));
+    return timestamp >= last24h;
+  }).length;
+
+  const tokenRefreshCount7d = tokenRefreshes.keys.filter((key) => {
+    const timestamp = parseInt(key.name.replace('stats:token_refresh:', ''));
+    return timestamp >= last7d;
+  }).length;
+
+  return {
+    apiCalls: { last24h: apiCallCount24h, last7d: apiCallCount7d },
+    tokenRefreshes: { last24h: tokenRefreshCount24h, last7d: tokenRefreshCount7d },
+  };
+}
+
 async function getOverallPresence(kv: KVNamespace): Promise<Presence> {
   const devices = await kv.list({ prefix: 'device:' });
 
@@ -72,7 +123,15 @@ async function handleDeviceUpdate(
   if (cachedPresence !== overallPresence) {
     console.log(`[Worker] Presence changed: ${cachedPresence} -> ${overallPresence}`);
     try {
-      const tado = new TadoClient(env.TADO_HOME_ID, env.KV);
+      const recordStat = async (stat: 'api_call' | 'token_refresh') => {
+        if (stat === 'api_call') {
+          await recordApiCall(env.KV);
+        } else {
+          await recordTokenRefresh(env.KV);
+        }
+      };
+
+      const tado = new TadoClient(env.TADO_HOME_ID, env.KV, recordStat);
 
       await tado.setPresence(overallPresence);
       await env.KV.put('tado:presence', overallPresence);
@@ -122,18 +181,22 @@ async function handleStatus(env: Env): Promise<Response> {
   const tadoPresence =
     (await env.KV.get('tado:presence')) || 'unknown';
 
+  const stats = await getStats(env.KV);
+
   console.log(`[Worker] Status: devices=${Object.keys(deviceStatuses).length}, tadoPresence=${tadoPresence}`);
 
   return new Response(
     JSON.stringify({
       devices: deviceStatuses,
       tadoPresence,
+      stats,
+      timestamp: Date.now(),
     }),
     {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
         'Pragma': 'no-cache',
         'Expires': '0',
       },

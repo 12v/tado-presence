@@ -10,13 +10,16 @@ interface TokenResponse {
   expires_in?: number;
 }
 
+export type RecordStatFn = (stat: 'api_call' | 'token_refresh') => Promise<void>;
+
 const TADO_CLIENT_ID = '1bb50063-6b0c-4d11-bd99-387f4a91cc46';
 const TOKEN_ENDPOINT = 'https://login.tado.com/oauth2/token';
 
 export class TadoClient {
   constructor(
     private homeId: string,
-    private kv: KVNamespace
+    private kv: KVNamespace,
+    private recordStat: RecordStatFn
   ) {}
 
   private async refreshAccessToken(): Promise<string> {
@@ -52,6 +55,8 @@ export class TadoClient {
       await this.kv.put('tado:refresh_token', data.refresh_token);
       console.log('[TadoClient] Refresh token rotated and cached');
     }
+
+    await this.recordStat('token_refresh');
 
     console.log('[TadoClient] Access token refreshed and cached');
     return data.access_token;
@@ -99,6 +104,8 @@ export class TadoClient {
         `Tado API error: ${response.status} - ${error.errors?.[0]?.title || 'Unknown error'}`
       );
     }
+
+    await this.recordStat('api_call');
 
     console.log('[TadoClient] Presence set successfully');
   }
