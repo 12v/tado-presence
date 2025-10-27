@@ -1,0 +1,7 @@
+name = "tado-presence"
+main = "src/index.ts"
+compatibility_date = "2024-10-25"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "adc2cdc57ff44a85ae0785ff083f5712"

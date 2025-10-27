@@ -1,0 +1,17 @@
+{
+  "name": "tado-presence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "auth:local": "node auth-local.mjs",
+    "kv:set-refresh-token": "wrangler kv key put tado:refresh_token --binding KV --remote",
+    "kv:get-refresh-token": "wrangler kv key get tado:refresh_token --binding KV --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240805.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^4.45.0"
+  }
+}
