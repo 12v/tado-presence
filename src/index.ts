@@ -14,14 +14,11 @@ interface DeviceUpdate {
 async function getOverallPresence(kv: KVNamespace): Promise<Presence> {
   const devices = await kv.list({ prefix: 'device:' });
 
-  for (const item of devices.keys) {
-    const status = await kv.get(item.name);
-    if (status === 'home') {
-      return 'HOME';
-    }
-  }
+  const statuses = await Promise.all(
+    devices.keys.map((item) => kv.get(item.name))
+  );
 
-  return 'AWAY';
+  return statuses.includes('home') ? 'HOME' : 'AWAY';
 }
 
 async function handleDeviceUpdate(
@@ -75,20 +72,7 @@ async function handleDeviceUpdate(
   if (cachedPresence !== overallPresence) {
     console.log(`[Worker] Presence changed: ${cachedPresence} -> ${overallPresence}`);
     try {
-      // Use cached tokens from KV if available
-      const cachedAccessToken = await env.KV.get('tado:access_token');
-      const cachedRefreshToken = await env.KV.get('tado:refresh_token');
-
-      if (!cachedRefreshToken) {
-        throw new Error('Refresh token not found in KV. Initialize with: wrangler kv:key put tado:refresh_token <token>');
-      }
-
-      const tado = new TadoClient(
-        cachedAccessToken || 'INVALID',
-        env.TADO_HOME_ID,
-        cachedRefreshToken,
-        env.KV
-      );
+      const tado = new TadoClient(env.TADO_HOME_ID, env.KV);
 
       await tado.setPresence(overallPresence);
       await env.KV.put('tado:presence', overallPresence);
