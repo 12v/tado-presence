@@ -68,36 +68,28 @@ async function handleDeviceUpdate(
   const overallPresence = await getOverallPresence(env.KV);
   console.log(`[Worker] Overall presence: ${overallPresence}`);
 
-  // Check current Tado presence
-  // Use cached tokens from KV if available (they may have been rotated during refresh)
-  const cachedAccessToken = await env.KV.get('tado:access_token');
-  const cachedRefreshToken = await env.KV.get('tado:refresh_token');
-
-  if (!cachedRefreshToken) {
-    throw new Error('Refresh token not found in KV. Initialize with: wrangler kv:key put tado:refresh_token <token>');
-  }
-
-  const tado = new TadoClient(
-    cachedAccessToken || 'INVALID', // Will trigger refresh on first 401
-    env.TADO_HOME_ID,
-    cachedRefreshToken,
-    env.KV
-  );
-  let currentPresence: Presence;
-  try {
-    currentPresence = await tado.getPresence();
-  } catch (error) {
-    console.error(
-      `[Worker] Failed to get Tado presence: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-    // If we can't get current presence, assume we need to update
-    currentPresence = overallPresence === 'HOME' ? 'AWAY' : 'HOME';
-  }
+  // Get cached Tado presence
+  const cachedPresence = (await env.KV.get('tado:presence')) as Presence | null;
 
   // Only update if presence changed
-  if (currentPresence !== overallPresence) {
-    console.log(`[Worker] Presence changed: ${currentPresence} -> ${overallPresence}`);
+  if (cachedPresence !== overallPresence) {
+    console.log(`[Worker] Presence changed: ${cachedPresence} -> ${overallPresence}`);
     try {
+      // Use cached tokens from KV if available
+      const cachedAccessToken = await env.KV.get('tado:access_token');
+      const cachedRefreshToken = await env.KV.get('tado:refresh_token');
+
+      if (!cachedRefreshToken) {
+        throw new Error('Refresh token not found in KV. Initialize with: wrangler kv:key put tado:refresh_token <token>');
+      }
+
+      const tado = new TadoClient(
+        cachedAccessToken || 'INVALID',
+        env.TADO_HOME_ID,
+        cachedRefreshToken,
+        env.KV
+      );
+
       await tado.setPresence(overallPresence);
       await env.KV.put('tado:presence', overallPresence);
       console.log(`[Worker] Successfully updated Tado presence`);
